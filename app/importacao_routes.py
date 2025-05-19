@@ -1,22 +1,32 @@
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, HTTPException
 from typing import List
 import requests
 from app.model.dados_comerciais import DadosComerciais
 from app.services import embrapa_service
+from app.mongo import db
+from pymongo import UpdateOne
+from pymongo.errors import PyMongoError
 
 router = APIRouter()
 
-@router.get("/importacao", response_model=List[DadosComerciais], summary="Dados de importação da Embrapa", 
-    responses={
-    status.HTTP_200_OK: {"description": "Dados de produção obtidos com sucesso."},
-    status.HTTP_404_NOT_FOUND: {"description": "Nenhum dado encontrado."},
-    status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "Erro interno no servidor."}
-})
+@router.get('/importacao', response_model=List[DadosComerciais], summary="Dados de importação da Embrapa")
 async def get_importacao():
     url = 'http://vitibrasil.cnpuv.embrapa.br/index.php?opcao=opt_05'
     response = requests.get(url)
     response.encoding = 'utf-8'
-    html = response.text
+    dados_extraidos = embrapa_service.extrair_exportacao_importacao(response.text)
+    registros = [DadosComerciais(**d) for d in dados_extraidos]
 
-    dados_extraidos = embrapa_service.extrair_exportacao_importacao(html)
-    return [DadosComerciais(**dado) for dado in dados_extraidos]
+    operations = [
+        UpdateOne(
+            {"pais": r.pais, "quantidade_kg": r.quantidade_kg, "valor_usd": r.valor_usd},
+            {"$setOnInsert": r.dict()},
+            upsert=True
+        ) for r in registros
+    ]
+
+    try:
+        db.importacao.bulk_write(operations, ordered=False)
+    except PyMongoError as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    return registros
